@@ -1,0 +1,51 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Every key here must also exist in Colors.Dark.xaml. -->
+    <SolidColorBrush x:Key="AccentBrush" Color="#2563EB"/>
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#1E40AF"/>
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#E8F0FE"/>
+    <SolidColorBrush x:Key="OnAccentBrush" Color="#FFFFFF"/>
+
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#EEF2F7"/>
+    <SolidColorBrush x:Key="PanelBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="SidebarBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="InputBrush" Color="#F1F5F9"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#E2E8F0"/>
+    <SolidColorBrush x:Key="DividerBrush" Color="#EDF1F6"/>
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#0F172A"/>
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#64748B"/>
+    <SolidColorBrush x:Key="TextSubtleBrush" Color="#94A3B8"/>
+
+    <SolidColorBrush x:Key="DangerBrush" Color="#DC2626"/>
+    <SolidColorBrush x:Key="DangerHoverBrush" Color="#B91C1C"/>
+    <SolidColorBrush x:Key="DangerSoftBrush" Color="#FEF2F2"/>
+    <SolidColorBrush x:Key="DangerSoftHoverBrush" Color="#FEE2E2"/>
+    <SolidColorBrush x:Key="DangerSoftBorderBrush" Color="#FECACA"/>
+    <SolidColorBrush x:Key="SuccessBrush" Color="#22C55E"/>
+    <SolidColorBrush x:Key="OfflineBrush" Color="#A3AEBD"/>
+    <SolidColorBrush x:Key="BadgeBrush" Color="#2563EB"/>
+
+    <SolidColorBrush x:Key="BubbleMineBrush" Color="#2563EB"/>
+    <SolidColorBrush x:Key="BubbleMineTextBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="BubbleMineMetaBrush" Color="#C7DBFF"/>
+    <SolidColorBrush x:Key="BubbleMineSoftBrush" Color="#3B74F0"/>
+    <SolidColorBrush x:Key="BubbleTheirsBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="LinkBrush" Color="#2563EB"/>
+    <SolidColorBrush x:Key="LinkOnMineBrush" Color="#D6E6FF"/>
+    <SolidColorBrush x:Key="BubbleTheirsTextBrush" Color="#0F172A"/>
+    <SolidColorBrush x:Key="BubbleTheirsMetaBrush" Color="#94A3B8"/>
+    <SolidColorBrush x:Key="BubbleTheirsBorderBrush" Color="#E3E8EF"/>
+    <SolidColorBrush x:Key="ReadReceiptMineBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="DateChipBrush" Color="#DCE3EC"/>
+    <SolidColorBrush x:Key="DateChipTextBrush" Color="#475569"/>
+    <SolidColorBrush x:Key="ProgressTrackBrush" Color="#E2E8F0"/>
+
+    <SolidColorBrush x:Key="ContactHoverBrush" Color="#F3F6FA"/>
+    <SolidColorBrush x:Key="ContactSelectedBrush" Color="#E8F0FE"/>
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="#CBD5E1"/>
+    <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#94A3B8"/>
+    <SolidColorBrush x:Key="MenuBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="MenuHoverBrush" Color="#F1F5F9"/>
+    <Color x:Key="ShadowColor">#0F172A</Color>
+</ResourceDictionary>

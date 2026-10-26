@@ -1,0 +1,78 @@
+# TS3 Messenger — track source only (src, tests, scripts, docs, solution).
+# Runtime data stays on each PC: %AppData%\Ts3Messenger, %LocalAppData%\Ts3Messenger.
+
+# --- .NET build ---
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+[Bb]uild/
+[Ll]og/
+[Ll]ogs/
+[Tt]est[Rr]esults/
+[Bb]enchmark[Rr]esults/
+*.user
+*.userosscache
+*.suo
+*.cache
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+project.lock.json
+project.fragment.lock.json
+artifacts/
+publish/
+**/publish/
+
+# --- IDE ---
+.vs/
+.idea/
+*.rsuser
+*.sln.docstates
+
+# --- Release / local publish output ---
+dist/
+[Dd]ist/
+**/TS3 Messenger/
+**/TS3 Messenger-build/
+
+# --- Secrets & environment (no server .env or keys in repo) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+secrets.json
+appsettings.*.local.json
+**/appsettings.Development.json
+
+# --- Client-local data (PII, sessions, crypto, transfer paths — normally under AppData) ---
+settings.json
+session.bin
+transfers.json
+device.key
+**/Ts3Messenger/logs/
+**/messenger-*.log
+
+# --- Databases & dumps (not app source) ---
+*.db
+*.sqlite
+*.sqlite3
+*.mdf
+*.ldf
+*.bak
+*.dump
+*.sql.gz
+
+# --- OS / misc ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.tmp
+*.temp
+~$*
