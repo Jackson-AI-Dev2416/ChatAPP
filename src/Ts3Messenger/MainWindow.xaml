@@ -100,7 +100,8 @@
                 <ListBox x:Name="ContactList" Margin="0,0,0,8"
                          Style="{StaticResource ContactListBoxStyle}"
                          ItemContainerStyle="{StaticResource ContactListItemStyle}"
-                         SelectionChanged="OnContactSelected"
+                         IsSynchronizedWithCurrentItem="False"
+                         PreviewMouseLeftButtonUp="OnContactPreviewMouseLeftButtonUp"
                          PreviewMouseRightButtonUp="OnContactRightClick">
                     <ListBox.Resources>
                         <Style TargetType="ScrollBar" BasedOn="{StaticResource ChatScrollBar}"/>

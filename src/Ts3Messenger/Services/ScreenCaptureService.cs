@@ -28,7 +28,11 @@ internal static class ScreenCaptureService
         encoder.Save(stream);
     }
 
-    public static BitmapSource? TryLoadImage(string path)
+    public static BitmapSource? TryLoadImage(string path) => TryLoadImage(path, decodePixelWidth: 0);
+
+    public static BitmapSource? TryLoadPreviewImage(string path) => TryLoadImage(path, decodePixelWidth: 640);
+
+    public static BitmapSource? TryLoadImage(string path, int decodePixelWidth)
     {
         if (!File.Exists(path))
             return null;
@@ -38,6 +42,8 @@ internal static class ScreenCaptureService
             img.BeginInit();
             img.UriSource = new Uri(path, UriKind.Absolute);
             img.CacheOption = BitmapCacheOption.OnLoad;
+            if (decodePixelWidth > 0)
+                img.DecodePixelWidth = decodePixelWidth;
             img.EndInit();
             img.Freeze();
             return img;

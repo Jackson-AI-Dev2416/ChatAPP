@@ -25,9 +25,9 @@ public partial class MainWindow : Window
 {
     private readonly Ts3ApiClient _api;
     private readonly UserMe _me;
-    private readonly MessageCryptoService _crypto;
     private readonly KeyStore _keys;
     private readonly ChatWebSocketClient _ws = new();
+    private ScreenWatchService? _screenWatch;
     private readonly FileTransferTcpService _fileTcp = new();
     private readonly FileReceiveCoordinator _fileReceiveCoordinator = new();
     private readonly ObservableCollection<ContactVm> _contacts = new();
@@ -37,6 +37,15 @@ public partial class MainWindow : Window
     private string? _currentPeerId;
     private readonly string _serverBaseUrl;
     private bool _contactSwitchInProgress;
+    private bool _suppressContactSelection;
+    private ContactVm? _pendingOpenContact;
+    private bool _pendingForceReload;
+    private string? _renderedContactId;
+    private string? _renderedRoomId;
+    private int _messageLoadGeneration;
+    private int _transferResumeGeneration;
+    private const long MaxBubblePreviewImageBytes = 30L * 1024 * 1024;
+    private const long MaxOpenImageBytes = 30L * 1024 * 1024;
     private readonly Dictionary<string, string> _senderFilePaths = new();
     private readonly Dictionary<string, FileSendPayload> _ephemeralSendPayloads = new();
     private readonly Dictionary<string, string> _recipientSavePaths = new();
@@ -59,7 +68,7 @@ public partial class MainWindow : Window
     private Point _longPressStart;
     private ChatMessage? _replyTo;
     private ChatMessage? _editingMessage;
-    private int _contactsRefreshGeneration;
+    private readonly SemaphoreSlim _contactsRefreshGate = new(1, 1);
     private readonly Dictionary<string, int> _punchWatchGeneration = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _punchWatchRooms = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _transferRoomIds = new(StringComparer.OrdinalIgnoreCase);
@@ -74,13 +83,12 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, (string Host, int Port)> _senderListenEndpoints = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _notifiedTransfers = new(StringComparer.OrdinalIgnoreCase);
 
-    public MainWindow(string serverBaseUrl, Ts3ApiClient api, UserMe me, MessageCryptoService crypto, KeyStore keys)
+    public MainWindow(string serverBaseUrl, Ts3ApiClient api, UserMe me, KeyStore keys)
     {
         InitializeComponent();
         AppIcon.ApplyToWindow(this);
         _api = api;
         _me = me;
-        _crypto = crypto;
         _keys = keys;
         _serverBaseUrl = serverBaseUrl;
         Title = $"TS3 Messenger — {me.login_id}";
@@ -89,6 +97,7 @@ public partial class MainWindow : Window
         MyAvatarText.Text = AvatarPalette.Initial(me.login_id);
         MyAvatar.Background = AvatarPalette.For(me.id);
         ContactList.ItemsSource = _contacts;
+        ContactList.IsSynchronizedWithCurrentItem = false;
         CollectionViewSource.GetDefaultView(_contacts).Filter = MatchesContactSearch;
         UpdateThemeGlyph();
         ThemeService.Changed += OnThemeChanged;
@@ -293,6 +302,8 @@ public partial class MainWindow : Window
         var resumeAfterServerLoss = _pendingServerRecovery;
         var showWhenRestored = _showMainWhenRestored;
         _pendingServerRecovery = false;
+        _screenWatch?.Dispose();
+        _screenWatch = null;
         await _ws.DisposeAsync();
         if (!resumeAfterServerLoss || TrayApplicationService.Instance.ExitRequested)
             return;
@@ -319,6 +330,9 @@ public partial class MainWindow : Window
         try
         {
             await BootstrapAsync(_serverBaseUrl);
+            _screenWatch?.Dispose();
+            _screenWatch = new ScreenWatchService(_api);
+            _screenWatch.Start();
             _silentTrayStartup = false;
         }
         catch (Exception ex)
@@ -345,7 +359,7 @@ public partial class MainWindow : Window
         await ChatTimestamps.TryLoadFromServerAsync(_api);
         try
         {
-            await _api.PutPublicKeyAsync(_crypto.ExportPublicKeyB64());
+            await _api.PutPublicKeyAsync(_keys.ExportPublicKeySpkiB64());
         }
         catch (Exception ex)
         {
@@ -358,6 +372,7 @@ public partial class MainWindow : Window
         _ws.OnServerLost += OnServerLost;
         await _ws.ConnectAsync(wsUri, _api.CookieHeader);
         await RefreshContactsAsync();
+        await LoadFirstAddressBookChatAsync();
     }
 
     private void OnChatWebSocketReconnected() =>
@@ -372,7 +387,19 @@ public partial class MainWindow : Window
 
     private async Task RefreshContactsAsync()
     {
-        var generation = Interlocked.Increment(ref _contactsRefreshGeneration);
+        await _contactsRefreshGate.WaitAsync();
+        try
+        {
+            await RefreshContactsCoreAsync();
+        }
+        finally
+        {
+            _contactsRefreshGate.Release();
+        }
+    }
+
+    private async Task RefreshContactsCoreAsync()
+    {
         List<ContactItem> rows;
         try
         {
@@ -384,9 +411,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (generation != _contactsRefreshGeneration)
-            return;
-
         List<RoomItem>? rooms = null;
         try
         {
@@ -397,32 +421,44 @@ public partial class MainWindow : Window
             AppLog.Warn($"방 목록 실패: {ex.Message}");
         }
 
-        var selectedPeerId = _selected?.Id;
-        SyncContactsFromApi(rows);
-        if (rooms != null)
-            SyncGroups(rooms);
-
-        if (!string.IsNullOrEmpty(selectedPeerId))
+        var selectedPeerId = _currentPeerId ?? _selected?.Id;
+        _suppressContactSelection = true;
+        try
         {
-            var normalized = ChatIds.NormalizeUserId(selectedPeerId);
-            var selectedVm = _contacts.FirstOrDefault(c => ChatIds.NormalizeUserId(c.Id) == normalized);
-            if (selectedVm != null)
+            SyncContactsFromApi(rows);
+            if (rooms != null)
+                SyncGroups(rooms);
+
+            ContactVm? keep = null;
+            if (!string.IsNullOrEmpty(selectedPeerId))
             {
-                _selected = selectedVm;
-                ContactList.SelectedItem = selectedVm;
+                var normalized = ChatIds.NormalizeUserId(selectedPeerId);
+                keep = _contacts.FirstOrDefault(c => ChatIds.NormalizeUserId(c.Id) == normalized);
             }
+            SelectContactSilently(keep);
+        }
+        finally
+        {
+            _suppressContactSelection = false;
         }
 
         await SubscribeToContactRoomsAsync(rows);
-        await RecoverBackgroundRoomTransfersAsync(rows);
-        if (rooms != null)
-        {
-            var groupRooms = rooms
-                .Where(r => string.Equals(r.RoomType, "group", StringComparison.OrdinalIgnoreCase))
-                .Select(r => new ContactItem { Id = r.Id, DirectRoomId = r.Id });
-            await RecoverBackgroundRoomTransfersAsync(groupRooms);
-        }
+        RestoreContactListSelection(_selected);
         UpdateTaskbarBadge();
+        ScheduleBackgroundTransferResume(rows, rooms);
+    }
+
+    private async Task LoadFirstAddressBookChatAsync()
+    {
+        if (_contacts.Count == 0)
+            return;
+        var vm = _contacts[0];
+        if (IsChatRenderedFor(vm))
+            return;
+
+        SelectContactSilently(vm);
+        AppLog.Info($"주소록 첫 대화 열기: {vm.LoginId} room={vm.DirectRoomId ?? "(없음)"}");
+        await OpenContactChatAsync(vm, forceReload: true);
     }
 
     private void SyncContactsFromApi(List<ContactItem> rows)
@@ -557,6 +593,11 @@ public partial class MainWindow : Window
         _selected = null;
         _currentRoomId = null;
         _currentPeerId = null;
+        _pendingOpenContact = null;
+        _pendingForceReload = false;
+        _renderedContactId = null;
+        _renderedRoomId = null;
+        _messageLoadGeneration++;
         _messages.Clear();
         ContactList.SelectedItem = null;
         ChatHeader.Visibility = Visibility.Collapsed;
@@ -617,43 +658,63 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private bool _contactOrderChanging;
+    private static bool SameContactId(string? left, string? right) =>
+        !string.IsNullOrEmpty(left)
+        && !string.IsNullOrEmpty(right)
+        && left.Equals(right, StringComparison.OrdinalIgnoreCase);
 
-    private void SortContactsByRecency()
+    private void SelectContactSilently(ContactVm? vm)
     {
-        var ordered = _contacts
-            .Select((contact, index) => (contact, index))
-            .OrderBy(x => x.contact.PreviewAt.HasValue ? 0 : 1)
-            .ThenByDescending(x => x.contact.PreviewAt ?? DateTime.MinValue)
-            .ThenBy(x => x.contact.LoginId, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(x => x.index)
-            .Select(x => x.contact)
-            .ToList();
-        for (var target = 0; target < ordered.Count; target++)
-        {
-            var current = _contacts.IndexOf(ordered[target]);
-            if (current >= 0 && current != target)
-                MoveContact(current, target);
-        }
+        _selected = vm;
+        RestoreContactListSelection(vm);
     }
 
-    private void BringContactToTop(ContactVm contact)
+    private void RestoreContactListSelection(ContactVm? keep)
     {
-        var index = _contacts.IndexOf(contact);
-        if (index > 0)
-            MoveContact(index, 0);
-    }
-
-    private void MoveContact(int from, int to)
-    {
-        _contactOrderChanging = true;
+        if (keep == null || !_contacts.Contains(keep))
+            return;
+        if (ReferenceEquals(ContactList.SelectedItem, keep))
+            return;
+        var suppressWas = _suppressContactSelection;
+        _suppressContactSelection = true;
         try
         {
-            _contacts.Move(from, to);
+            ContactList.SelectedItem = keep;
         }
         finally
         {
-            _contactOrderChanging = false;
+            _suppressContactSelection = suppressWas;
+        }
+    }
+
+    private void SortContactsByRecency()
+    {
+        var keep = _selected;
+        var suppressWas = _suppressContactSelection;
+        _suppressContactSelection = true;
+        try
+        {
+            var ordered = _contacts
+                .Select((contact, index) => (contact, index))
+                .OrderBy(x => x.contact.PreviewAt.HasValue ? 0 : 1)
+                .ThenByDescending(x => x.contact.PreviewAt ?? DateTime.MinValue)
+                .ThenBy(x => x.contact.LoginId, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.index)
+                .Select(x => x.contact)
+                .ToList();
+            for (var target = 0; target < ordered.Count; target++)
+            {
+                var current = _contacts.IndexOf(ordered[target]);
+                if (current >= 0 && current != target)
+                    _contacts.Move(current, target);
+            }
+
+            if (keep != null && _contacts.Contains(keep))
+                ContactList.SelectedItem = keep;
+        }
+        finally
+        {
+            _suppressContactSelection = suppressWas;
         }
     }
 
@@ -693,7 +754,8 @@ public partial class MainWindow : Window
 
         if (!MatchesContactSearch(vm))
             ContactSearchBox.Text = "";
-        ContactList.SelectedItem = vm;
+        SelectContactSilently(vm);
+        await OpenContactChatAsync(vm);
     }
 
     private bool _contactFilterRefreshing;
@@ -746,7 +808,10 @@ public partial class MainWindow : Window
             await RefreshContactsAsync();
             var vm = _contacts.FirstOrDefault(c => c.Id.Equals(GroupContactId(created.Id), StringComparison.OrdinalIgnoreCase));
             if (vm != null)
-                ContactList.SelectedItem = vm;
+            {
+                SelectContactSilently(vm);
+                await OpenContactChatAsync(vm);
+            }
         }
         catch (Exception ex)
         {
@@ -777,28 +842,11 @@ public partial class MainWindow : Window
             var picker = new Windows.FileFolderPickerWindow { Owner = compose };
             if (picker.ShowDialog() != true || picker.SelectedPaths.Count == 0)
                 return;
-            OutgoingBundle bundle;
-            try
-            {
-                bundle = await FileSendPlanner.FromPathsAsync(picker.SelectedPaths);
-            }
-            catch (FileSendPlanException ex)
-            {
-                AppDialog.Show(ex.Message, "Multi message", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-            if (bundle.TotalSize > FileTransferLimits.MaxFileSizeBytes)
-            {
-                AppDialog.Show($"Too large to send (max {FileTransferLimits.MaxFileSizeLabel} in total).",
-                    "Multi message", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            var confirm = new FileSendConfirmWindow(bundle) { Owner = compose };
-            if (confirm.ShowDialog() != true)
-                return;
-            compose.SetBusy(true, "Sending files...");
-            var status = await FanOutFilesAsync(ids, bundle, confirm.Caption);
-            compose.SetBusy(false, status);
+            await PromptAndFanOutFilesAsync(compose, ids, picker.SelectedPaths);
+        };
+        compose.SendDroppedFilesAsync += async paths =>
+        {
+            await PromptAndFanOutFilesAsync(compose, ids, paths);
         };
         compose.SendSnapshotAsync += async () =>
         {
@@ -828,6 +876,44 @@ public partial class MainWindow : Window
             }));
         };
         compose.Show();
+    }
+
+    private async Task PromptAndFanOutFilesAsync(
+        MultiComposeWindow compose,
+        IReadOnlyList<string> userIds,
+        IEnumerable<string> paths)
+    {
+        OutgoingBundle bundle;
+        try
+        {
+            bundle = await FileSendPlanner.FromPathsAsync(paths);
+        }
+        catch (FileSendPlanException ex)
+        {
+            AppDialog.Show(ex.Message, "Multi message", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        catch (Exception ex)
+        {
+            AppDialog.Show(UserErrorMessages.ForUi(ex, "file preparation"), "Multi message",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (bundle.TotalSize > FileTransferLimits.MaxFileSizeBytes)
+        {
+            AppDialog.Show($"Too large to send (max {FileTransferLimits.MaxFileSizeLabel} in total).",
+                "Multi message", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var confirm = new FileSendConfirmWindow(bundle) { Owner = compose };
+        if (confirm.ShowDialog() != true)
+            return;
+
+        compose.SetBusy(true, "Sending files...");
+        var status = await FanOutFilesAsync(userIds, bundle, confirm.Caption);
+        compose.SetBusy(false, status);
     }
 
     private async Task<string> EnsureDirectRoomAsync(string userId)
@@ -1007,15 +1093,77 @@ public partial class MainWindow : Window
         UpdateTaskbarBadge();
     }
 
-    private async void OnContactSelected(object sender, SelectionChangedEventArgs e)
+    private bool IsChatRenderedFor(ContactVm vm) =>
+        ChatHeader.Visibility == Visibility.Visible
+        && SameContactId(_renderedContactId, vm.Id)
+        && SameContactId(_currentPeerId, vm.Id)
+        && !string.IsNullOrEmpty(_renderedRoomId)
+        && !string.IsNullOrEmpty(_currentRoomId)
+        && ChatIds.NormalizeRoomId(_renderedRoomId) == ChatIds.NormalizeRoomId(_currentRoomId);
+
+    private void MarkChatRendered(string roomId)
     {
-        if (_contactSwitchInProgress || _contactFilterRefreshing) return;
-        if (_contactOrderChanging) return;
-        if (ContactList.SelectedItem is not ContactVm vm) return;
+        _renderedRoomId = ChatIds.NormalizeRoomId(roomId);
+        _renderedContactId = _currentPeerId;
+    }
+
+    private ContactVm? HitTestContact(ListBox list, MouseButtonEventArgs e)
+    {
+        var hit = list.InputHitTest(e.GetPosition(list)) as DependencyObject;
+        while (hit != null && hit is not ListBoxItem)
+            hit = GetParentObject(hit);
+        return hit is ListBoxItem { DataContext: ContactVm vm } ? vm : null;
+    }
+
+    private void OnContactPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_contactFilterRefreshing) return;
+        if (sender is not ListBox list) return;
+        var vm = HitTestContact(list, e);
+        if (vm == null)
+            return;
+        _ = OpenContactChatAsync(vm);
+    }
+
+    private async Task OpenContactChatAsync(ContactVm vm, bool forceReload = false)
+    {
+        if (_contactSwitchInProgress)
+        {
+            _pendingOpenContact = vm;
+            _pendingForceReload = forceReload;
+            return;
+        }
+
         _contactSwitchInProgress = true;
+        _pendingOpenContact = vm;
+        _pendingForceReload = forceReload;
         try
         {
-            _selected = vm;
+            while (_pendingOpenContact != null)
+            {
+                var current = _pendingOpenContact;
+                var force = _pendingForceReload;
+                _pendingOpenContact = null;
+                _pendingForceReload = false;
+                await OpenContactChatCoreAsync(current, force);
+            }
+        }
+        finally
+        {
+            _contactSwitchInProgress = false;
+        }
+    }
+
+    private async Task OpenContactChatCoreAsync(ContactVm vm, bool forceReload = false)
+    {
+        SelectContactSilently(vm);
+        if (!forceReload && IsChatRenderedFor(vm))
+            return;
+
+        var loadGeneration = ++_messageLoadGeneration;
+        try
+        {
+            _currentPeerId = vm.Id;
             ChatTitle.Text = vm.LoginId;
             ChatTitleHost.Cursor = vm.IsGroup ? Cursors.Hand : Cursors.Arrow;
             ChatHeader.DataContext = vm;
@@ -1025,7 +1173,6 @@ public partial class MainWindow : Window
             _forceScrollToEnd = true;
             ClearMessageSelection();
             ClearReply();
-            _currentPeerId = vm.Id;
             _currentRoomId = string.IsNullOrEmpty(vm.DirectRoomId)
                 ? null
                 : ChatIds.NormalizeRoomId(vm.DirectRoomId);
@@ -1034,14 +1181,23 @@ public partial class MainWindow : Window
                 if (vm.IsGroup)
                     return;
                 _currentRoomId = ChatIds.NormalizeRoomId(await _api.CreateDirectRoomAsync(vm.Id));
+                if (loadGeneration != _messageLoadGeneration)
+                    return;
                 vm.DirectRoomId = _currentRoomId;
             }
             await EnsureRoomSubscribedAsync(_currentRoomId!);
-            await LoadMessagesAsync();
-            await RefreshContactsAsync();
+            if (loadGeneration != _messageLoadGeneration)
+                return;
+            await LoadMessagesAsync(loadGeneration);
+            RestoreContactListSelection(vm);
         }
         catch (Exception ex)
         {
+            if (loadGeneration == _messageLoadGeneration)
+            {
+                _renderedContactId = null;
+                _renderedRoomId = null;
+            }
             AppLog.Error("연락처 선택", ex);
             AppDialog.Show(
                 UserErrorMessages.ForUi(ex, "open chat"),
@@ -1049,26 +1205,22 @@ public partial class MainWindow : Window
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
-        finally
-        {
-            _contactSwitchInProgress = false;
-        }
     }
 
     private async void OnContactRightClick(object sender, MouseButtonEventArgs e)
     {
         if (sender is not ListBox list) return;
-        var item = list.InputHitTest(e.GetPosition(list)) as DependencyObject;
-        while (item != null && item is not ListBoxItem)
-            item = GetParentObject(item);
-        if (item is not ListBoxItem { DataContext: ContactVm vm }) return;
-        list.SelectedItem = vm;
+        var vm = HitTestContact(list, e);
+        if (vm == null) return;
+        SelectContactSilently(vm);
         if (AppDialog.Show(
                 "Delete this chat history from your screen? It will stay for everyone else.",
                 "Clear chat",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
+        if (!IsChatRenderedFor(vm))
+            await OpenContactChatAsync(vm);
         await ClearCurrentRoomHistoryAsync();
     }
 
@@ -1168,19 +1320,42 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadMessagesAsync()
+    private async Task LoadMessagesAsync(int loadGeneration)
     {
-        if (_currentRoomId == null) return;
+        var roomId = _currentRoomId;
+        if (roomId == null) return;
+        var rows = await _api.LoadMessagesAsync(roomId, _me.id);
+        if (loadGeneration != _messageLoadGeneration || !IsUiRoomActive(roomId))
+            return;
         _messages.Clear();
         ClearMessageSelection();
-        var rows = await _api.LoadMessagesAsync(_currentRoomId, _me.id);
         _messages.AddRange(rows);
-        await EnsureRoomSubscribedAsync(_currentRoomId);
-        await MergeRoomFileTransfersAsync(_currentRoomId);
-        await AutoAcceptPendingSnapshotsInRoomAsync();
-        await RecoverRoomTransfersAsync();
+        AppLog.Info($"메시지 로드 {roomId}: {rows.Count}건");
         RenderMessages();
-        await MarkCurrentRoomReadIfViewingAsync();
+        MarkChatRendered(roomId);
+        _ = MarkCurrentRoomReadIfViewingAsync();
+        ScheduleOpenRoomFileMerge(roomId, loadGeneration);
+    }
+
+    private void ScheduleOpenRoomFileMerge(string roomId, int loadGeneration)
+    {
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            if (loadGeneration != _messageLoadGeneration || !IsUiRoomActive(roomId))
+                return;
+            try
+            {
+                await MergeRoomFileTransfersAsync(roomId);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"파일 전송 목록 불러오기 실패: {ex.Message}");
+            }
+            if (loadGeneration != _messageLoadGeneration || !IsUiRoomActive(roomId))
+                return;
+            RenderMessages();
+            await MarkCurrentRoomReadIfViewingAsync();
+        }, DispatcherPriority.Background);
     }
 
     private async Task EnsureRoomSubscribedAsync(string roomId)
@@ -1207,15 +1382,37 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ScheduleBackgroundTransferResume(List<ContactItem> contacts, List<RoomItem>? rooms)
+    {
+        var generation = ++_transferResumeGeneration;
+        var groupRooms = rooms?
+            .Where(r => string.Equals(r.RoomType, "group", StringComparison.OrdinalIgnoreCase))
+            .Select(r => new ContactItem { Id = r.Id, DirectRoomId = r.Id })
+            .ToList() ?? [];
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            if (generation != _transferResumeGeneration)
+                return;
+            await RecoverBackgroundRoomTransfersAsync(contacts, generation);
+            if (generation != _transferResumeGeneration)
+                return;
+            if (groupRooms.Count > 0)
+                await RecoverBackgroundRoomTransfersAsync(groupRooms, generation);
+        }, DispatcherPriority.Background);
+    }
+
     /// <summary>
-    /// Runs on login and on every presence change, so a transfer continues as soon as
-    /// the other side comes back online. Transfers never expire.
+    /// Continues transfers the user already accepted, and auto-receives snapshots.
+    /// Regular pending files stay pending until the user saves them. Never blocks opening a chat.
     /// </summary>
-    private async Task RecoverBackgroundRoomTransfersAsync(IEnumerable<ContactItem> contacts)
+    private async Task RecoverBackgroundRoomTransfersAsync(IEnumerable<ContactItem> contacts, int generation)
     {
         var normMe = ChatIds.NormalizeUserId(_me.id);
         foreach (var c in contacts)
         {
+            if (generation != _transferResumeGeneration)
+                return;
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
             if (string.IsNullOrWhiteSpace(c.DirectRoomId))
                 continue;
             var roomId = ChatIds.NormalizeRoomId(c.DirectRoomId);
@@ -1233,12 +1430,14 @@ public partial class MainWindow : Window
 
             foreach (var raw in transfers)
             {
+                if (generation != _transferResumeGeneration)
+                    return;
                 var t = TransferJson.Parse(raw, roomId);
                 var isMine = t.SenderUserId == normMe;
                 var row = TransferJson.RowForViewer(t, _me.id, isMine);
                 RememberTransferMeta(t);
                 var status = ViewerStatus(t, row);
-                if (status is "expired" or "cancelled")
+                if (status is "expired" or "cancelled" or "completed" or "failed" or "rejected")
                     continue;
                 if (SnapshotTransferHelper.IsSnapshotFileName(t.FileName))
                 {
@@ -1253,14 +1452,17 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                if (!isMine && status is "accepted" or "in_progress")
+                if (status is not ("accepted" or "in_progress"))
+                    continue;
+                if (!isMine)
                     await EnsureIncomingBundleReceivingAsync(t.Id, roomId);
-                else if (isMine && status is "accepted" or "in_progress")
+                else
                     await TryResumeOutgoingTransferAsync(t.Id, t.FileName);
             }
         }
 
-        if (_messages.Any(m => m.IsFileTransfer && !m.IsMine && m.FileStatus is "accepted" or "in_progress"))
+        if (generation == _transferResumeGeneration
+            && _messages.Any(m => m.IsFileTransfer && !m.IsMine && m.FileStatus is "accepted" or "in_progress"))
             RenderMessages();
     }
 
@@ -1483,20 +1685,6 @@ public partial class MainWindow : Window
         return _contacts.FirstOrDefault(c => ChatIds.NormalizeUserId(c.Id) == norm)?.LoginId ?? norm;
     }
 
-    private async Task AutoAcceptPendingSnapshotsInRoomAsync()
-    {
-        var pending = _messages
-            .Where(x => x.IsSnapshot && !x.IsMine && x.FileStatus == "pending" && x.FileTransferId != null)
-            .ToList();
-        foreach (var m in pending)
-        {
-            if (_recipientSavePaths.ContainsKey(m.FileTransferId!))
-                continue;
-            var savePath = SnapshotPaths.ReceivedFilePath(m.FileTransferId!, m.FileName);
-            await AcceptIncomingFileAsync(m, savePath);
-        }
-    }
-
     private async Task MergeRoomFileTransfersAsync(string roomId)
     {
         try
@@ -1520,6 +1708,11 @@ public partial class MainWindow : Window
 
     private string? ResolveStoredImagePath(string transferId, string fileName, string status)
     {
+        if (!SnapshotTransferHelper.IsImageTransfer(
+                fileName,
+                null,
+                SnapshotTransferHelper.IsSnapshotFileName(fileName)))
+            return null;
         if (_transferLocalPaths.TryGetValue(transferId, out var known) && File.Exists(known))
             return known;
         if (status == "completed")
@@ -1694,7 +1887,7 @@ public partial class MainWindow : Window
     {
         var isSelected = _selectedMessageIds.Contains(m.Id);
         var align = m.IsMine ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-        var isImage = m.IsFileTransfer && m.IsImageTransfer;
+        var isSnapshotPreview = m.IsFileTransfer && m.IsSnapshot;
         var emojiOnly = !m.IsFileTransfer
                         && ChatEmojiHelper.IsEmojiOnlyMessage(ComposeInputHelper.NormalizeNewlines(m.PlainText ?? ""));
 
@@ -1710,7 +1903,7 @@ public partial class MainWindow : Window
         {
             CornerRadius = corners,
             Padding = emojiOnly ? new Thickness(2)
-                : isImage ? new Thickness(4)
+                : isSnapshotPreview ? new Thickness(4)
                 : m.IsFileTransfer ? new Thickness(10, 10, 12, 7)
                 : new Thickness(12, 7, 10, 7),
             MaxWidth = BubbleMaxWidth,
@@ -1727,7 +1920,7 @@ public partial class MainWindow : Window
         bubble.SetResourceReference(TextElement.ForegroundProperty,
             emojiOnly ? "TextPrimaryBrush" : m.IsMine ? "BubbleMineTextBrush" : "BubbleTheirsTextBrush");
         bubble.Child = m.IsFileTransfer
-            ? isImage ? BuildImageBubbleContent(m) : BuildFileBubbleContent(m)
+            ? isSnapshotPreview ? BuildImageBubbleContent(m) : BuildFileBubbleContent(m)
             : BuildTextBubbleContent(m, emojiOnly);
 
         bubble.PreviewMouseLeftButtonDown += OnBubblePreviewMouseDown;
@@ -1942,8 +2135,8 @@ public partial class MainWindow : Window
     private UIElement BuildImageBubbleContent(ChatMessage m)
     {
         var stack = new StackPanel();
-        TryGetImagePath(m, out var path);
-        var bitmap = path != null ? LoadCachedImage(path) : null;
+        var hasPath = TryGetImagePath(m, out var path);
+        var bitmap = hasPath ? LoadCachedImage(path) : null;
         var hasCaption = !string.IsNullOrWhiteSpace(m.Caption);
         var completed = m.FileStatus == "completed";
         var metaOnImage = bitmap != null && completed && !hasCaption;
@@ -1987,7 +2180,7 @@ public partial class MainWindow : Window
             stack.Children.Add(card);
         }
 
-        if (bitmap == null && completed)
+        if (bitmap == null && completed && !TryGetImagePath(m, out _))
         {
             var note = new TextBlock
             {
@@ -2150,7 +2343,12 @@ public partial class MainWindow : Window
         DateTime stamp;
         try
         {
-            stamp = File.GetLastWriteTimeUtc(path);
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length <= 0 || info.Length > MaxBubblePreviewImageBytes)
+                return null;
+            if (!SnapshotTransferHelper.IsImageFileName(info.Name))
+                return null;
+            stamp = info.LastWriteTimeUtc;
         }
         catch
         {
@@ -2159,7 +2357,7 @@ public partial class MainWindow : Window
 
         if (_imageCache.TryGetValue(path, out var hit) && hit.Stamp == stamp)
             return hit.Image;
-        var image = ScreenCaptureService.TryLoadImage(path);
+        var image = ScreenCaptureService.TryLoadPreviewImage(path);
         if (image != null)
             _imageCache[path] = (stamp, image);
         return image;
@@ -2268,9 +2466,16 @@ public partial class MainWindow : Window
 
     private async Task HandleFileBubbleClickAsync(ChatMessage m)
     {
-        if (m.IsImageTransfer && m.FileStatus == "completed" && TryGetImagePath(m, out var previewPath))
+        if (m.IsSnapshot && m.FileStatus == "completed" && TryGetImagePath(m, out var snapshotPath))
         {
-            new ImagePreviewWindow(previewPath, this).ShowDialog();
+            new ImagePreviewWindow(snapshotPath, this).ShowDialog();
+            return;
+        }
+
+        if (m.IsImageTransfer && !m.IsSnapshot && m.FileStatus == "completed"
+            && TryGetImagePath(m, out var imagePath) && IsOpenableImageFile(imagePath))
+        {
+            OpenImageFile(imagePath);
             return;
         }
 
@@ -2319,6 +2524,38 @@ public partial class MainWindow : Window
         }
 
         return paths.FirstOrDefault(File.Exists);
+    }
+
+    private static bool IsOpenableImageFile(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists
+                && info.Length > 0
+                && info.Length <= MaxOpenImageBytes
+                && SnapshotTransferHelper.IsImageFileName(info.Name);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void OpenImageFile(string path)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"이미지 열기 실패: {ex.Message}");
+        }
     }
 
     private void ShowTransferInExplorer(ChatMessage m)
@@ -3129,7 +3366,7 @@ public partial class MainWindow : Window
         if (contact == null)
             return;
         contact.SetPreview(NotificationPreview(plainText), at, mine);
-        BringContactToTop(contact);
+        SortContactsByRecency();
     }
 
     private async void OnSnapshotButtonClick(object sender, RoutedEventArgs e)

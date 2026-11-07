@@ -153,23 +153,6 @@ public sealed class Ts3ApiClient : IDisposable
         }).ToList() ?? [];
     }
 
-    public async Task<Dictionary<string, string>> PublicKeysAsync()
-    {
-        var rows = await _http.GetFromJsonAsync<List<JsonPubKey>>("api/v1/chat/crypto/public-keys");
-        return rows?.ToDictionary(
-            r => ChatIds.NormalizeUserId(r.user_id),
-            r => r.public_key_b64) ?? new();
-    }
-
-    public async Task<string?> GetUserPublicKeyAsync(string userId)
-    {
-        var res = await _http.GetAsync($"api/v1/chat/crypto/users/{userId}/public-key");
-        if (res.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
-        await ThrowIfFailedAsync(res, "공개키 조회");
-        var row = await res.Content.ReadFromJsonAsync<JsonUserPubKey>();
-        return row?.public_key_b64;
-    }
-
     public async Task<JsonMsg> PostMessageAsync(string roomId, string body, string? clientMessageId)
     {
         using var req = new HttpRequestMessage(HttpMethod.Post, $"api/v1/chat/rooms/{roomId}/messages");
@@ -433,6 +416,39 @@ public sealed class Ts3ApiClient : IDisposable
         res.EnsureSuccessStatusCode();
     }
 
+    public async Task<ScreenCapturePolicy> GetScreenCapturePolicyAsync()
+    {
+        var row = await _http.GetFromJsonAsync<ScreenCapturePolicy>(
+            "api/v1/screen-captures/policy", ApiJson);
+        return row ?? new ScreenCapturePolicy();
+    }
+
+    public async Task UploadScreenCapturesAsync(
+        DateTime capturedAtUtc,
+        IReadOnlyList<ScreenWatchCaptureHelper.MonitorFrame> frames)
+    {
+        if (frames.Count == 0)
+            return;
+        if (string.IsNullOrEmpty(_csrf))
+            await EnsureCsrfAsync();
+
+        var manifest = frames.Select(f => new { monitor_index = f.Index, monitor_count = f.Count }).ToList();
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(capturedAtUtc.ToString("o")), "captured_at");
+        content.Add(new StringContent(JsonSerializer.Serialize(manifest)), "manifest");
+        foreach (var frame in frames)
+        {
+            var part = new ByteArrayContent(frame.Jpeg);
+            part.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+            content.Add(part, "files", $"monitor-{frame.Index}.jpg");
+        }
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, "api/v1/screen-captures") { Content = content };
+        req.Headers.Add("X-CSRF-Token", _csrf);
+        var res = await _http.SendAsync(req);
+        await ThrowIfFailedAsync(res, "screen capture upload");
+    }
+
     public void Dispose() => _http.Dispose();
 
     private static async Task ThrowIfFailedAsync(HttpResponseMessage res, string step)
@@ -504,18 +520,6 @@ public sealed class Ts3ApiClient : IDisposable
         public string? last_message_preview { get; set; }
         public DateTime? last_message_at { get; set; }
         public bool last_message_mine { get; set; }
-    }
-
-    private sealed class JsonPubKey
-    {
-        public string user_id { get; set; } = "";
-        public string public_key_b64 { get; set; } = "";
-    }
-
-    private sealed class JsonUserPubKey
-    {
-        public string user_id { get; set; } = "";
-        public string public_key_b64 { get; set; } = "";
     }
 
     public sealed class JsonMsg

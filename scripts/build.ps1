@@ -30,10 +30,17 @@ if ($Release) {
         dotnet build $sln -c Release
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
+    $outDir = Join-Path $root "dist\TS3 Messenger"
+    $distRoot = Join-Path $root "dist"
+    if (Test-Path $distRoot) {
+        Remove-Item -LiteralPath $distRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     dotnet publish $proj -c Release -r win-x64 `
         --self-contained true `
         -p:PublishSingleFile=true `
         -p:IncludeNativeLibrariesForSelfExtract=true `
-        -o (Join-Path $root "dist\TS3 Messenger")
-    Write-Host "Published: $(Join-Path $root 'dist\TS3 Messenger\Ts3Messenger.exe')"
+        -o $outDir
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Host "Published: $(Join-Path $outDir 'Ts3Messenger.exe')"
 }

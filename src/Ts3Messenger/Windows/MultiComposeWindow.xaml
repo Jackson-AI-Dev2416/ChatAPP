@@ -3,9 +3,15 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Multi message" Width="460" SizeToContent="Height"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        Background="{DynamicResource SurfaceBrush}">
+        Background="{DynamicResource SurfaceBrush}"
+        AllowDrop="True"
+        PreviewDragOver="OnFileDragOver"
+        PreviewDrop="OnFileDrop">
     <Border Background="{DynamicResource PanelBrush}" Margin="16" Padding="16"
-            CornerRadius="16" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+            CornerRadius="16" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+            AllowDrop="True"
+            PreviewDragOver="OnFileDragOver"
+            PreviewDrop="OnFileDrop">
         <StackPanel>
             <TextBlock Text="Multi message" FontSize="18" FontWeight="SemiBold"
                        Foreground="{DynamicResource TextPrimaryBrush}"/>

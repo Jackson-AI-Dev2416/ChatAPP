@@ -18,7 +18,6 @@ public sealed class SignInSuccess
     public required string ServerBaseUrl { get; init; }
     public required Ts3ApiClient Api { get; init; }
     public required UserMe Me { get; init; }
-    public required MessageCryptoService Crypto { get; init; }
     public required KeyStore Keys { get; init; }
 }
 
@@ -92,10 +91,9 @@ public static class SessionBootstrap
     private static async Task<SignInSuccess> FinishSignInAsync(string baseUrl, Ts3ApiClient api, UserMe me)
     {
         var keys = new KeyStore();
-        var crypto = new MessageCryptoService(keys);
         try
         {
-            await api.PutPublicKeyAsync(crypto.ExportPublicKeyB64());
+            await api.PutPublicKeyAsync(keys.ExportPublicKeySpkiB64());
         }
         catch
         {
@@ -109,7 +107,6 @@ public static class SessionBootstrap
             ServerBaseUrl = baseUrl,
             Api = api,
             Me = me,
-            Crypto = crypto,
             Keys = keys,
         };
     }
@@ -149,7 +146,7 @@ public static class SessionBootstrap
     {
         CloseLoginWindows();
         success.Keys.Persist();
-        var main = new MainWindow(success.ServerBaseUrl, success.Api, success.Me, success.Crypto, success.Keys);
+        var main = new MainWindow(success.ServerBaseUrl, success.Api, success.Me, success.Keys);
         if (startInTrayOnly)
         {
             main.EnableSilentTrayStartup();
